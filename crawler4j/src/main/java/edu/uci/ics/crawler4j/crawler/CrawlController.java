@@ -20,6 +20,7 @@ package edu.uci.ics.crawler4j.crawler;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,6 +31,7 @@ import com.sleepycat.je.EnvironmentConfig;
 import edu.uci.ics.crawler4j.fetcher.PageFetcher;
 import edu.uci.ics.crawler4j.frontier.DocIDServer;
 import edu.uci.ics.crawler4j.frontier.Frontier;
+import edu.uci.ics.crawler4j.parser.Parser;
 import edu.uci.ics.crawler4j.robotstxt.RobotstxtServer;
 import edu.uci.ics.crawler4j.url.TLDList;
 import edu.uci.ics.crawler4j.url.URLCanonicalizer;
@@ -42,9 +44,10 @@ import edu.uci.ics.crawler4j.util.IO;
  *
  * @author Yasser Ganjisaffar
  */
-public class CrawlController extends Configurable {
+public class CrawlController {
 
     static final Logger logger = LoggerFactory.getLogger(CrawlController.class);
+    private final CrawlConfig config;
 
     /**
      * The 'customData' object can be used for passing custom crawl-related
@@ -73,15 +76,28 @@ public class CrawlController extends Configurable {
     protected RobotstxtServer robotstxtServer;
     protected Frontier frontier;
     protected DocIDServer docIdServer;
+    protected TLDList tldList;
 
     protected final Object waitingLock = new Object();
     protected final Environment env;
 
+    protected Parser parser;
+
     public CrawlController(CrawlConfig config, PageFetcher pageFetcher,
                            RobotstxtServer robotstxtServer) throws Exception {
-        super(config);
+        this(config, pageFetcher, null, robotstxtServer, null);
+    }
 
+    public CrawlController(CrawlConfig config, PageFetcher pageFetcher,
+            RobotstxtServer robotstxtServer, TLDList tldList) throws Exception {
+        this(config, pageFetcher, null, robotstxtServer, tldList);
+    }
+
+    public CrawlController(CrawlConfig config, PageFetcher pageFetcher, Parser parser,
+                           RobotstxtServer robotstxtServer, TLDList tldList) throws Exception {
         config.validate();
+        this.config = config;
+
         File folder = new File(config.getCrawlStorageFolder());
         if (!folder.exists()) {
             if (folder.mkdirs()) {
@@ -93,7 +109,7 @@ public class CrawlController extends Configurable {
             }
         }
 
-        TLDList.setUseOnline(config.isOnlineTldListUpdate());
+        this.tldList = tldList == null ? new TLDList(config) : tldList;
 
         boolean resumable = config.isResumableCrawling();
 
@@ -101,6 +117,7 @@ public class CrawlController extends Configurable {
         envConfig.setAllowCreate(true);
         envConfig.setTransactional(resumable);
         envConfig.setLocking(resumable);
+        envConfig.setLockTimeout(config.getDbLockTimeout(), TimeUnit.MILLISECONDS);
 
         File envHome = new File(config.getCrawlStorageFolder() + "/frontier");
         if (!envHome.exists()) {
@@ -123,10 +140,15 @@ public class CrawlController extends Configurable {
         frontier = new Frontier(env, config);
 
         this.pageFetcher = pageFetcher;
+        this.parser = parser == null ? new Parser(config, tldList) : parser;
         this.robotstxtServer = robotstxtServer;
 
         finished = false;
         shuttingDown = false;
+    }
+
+    public Parser getParser() {
+        return parser;
     }
 
     public interface WebCrawlerFactory<T extends WebCrawler> {
@@ -231,8 +253,6 @@ public class CrawlController extends Configurable {
             }
 
             final CrawlController controller = this;
-            final CrawlConfig config = this.getConfig();
-
             Thread monitorThread = new Thread(new Runnable() {
 
                 @Override
@@ -434,6 +454,7 @@ public class CrawlController extends Configurable {
             }
 
             WebURL webUrl = new WebURL();
+            webUrl.setTldList(tldList);
             webUrl.setURL(canonicalUrl);
             webUrl.setDocid(docId);
             webUrl.setDepth((short) 0);
@@ -544,5 +565,13 @@ public class CrawlController extends Configurable {
         this.shuttingDown = true;
         pageFetcher.shutDown();
         frontier.finish();
+    }
+
+    public CrawlConfig getConfig() {
+        return config;
+    }
+
+    public TLDList getTldList() {
+        return tldList;
     }
 }

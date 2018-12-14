@@ -23,7 +23,10 @@ import java.util.HashSet;
 import java.util.List;
 
 import org.apache.http.Header;
+import org.apache.http.client.CookieStore;
 import org.apache.http.client.config.CookieSpecs;
+import org.apache.http.conn.DnsResolver;
+import org.apache.http.impl.conn.SystemDefaultDnsResolver;
 import org.apache.http.message.BasicHeader;
 
 import edu.uci.ics.crawler4j.crawler.authentication.AuthInfo;
@@ -41,6 +44,11 @@ public class CrawlConfig {
      * stopped/crashed crawl. However, it makes crawling slightly slower
      */
     private boolean resumableCrawling = false;
+
+    /**
+     * The lock timeout for the underlying sleepycat DB, in milliseconds
+     */
+    private long dbLockTimeout = 500;
 
     /**
      * Maximum depth of crawling For unlimited depth this parameter should be
@@ -125,9 +133,13 @@ public class CrawlConfig {
     /**
      * Should the TLD list be updated automatically on each run? Alternatively,
      * it can be loaded from the embedded tld-names.zip file that was obtained from
-     * https://publicsuffix.org/list/effective_tld_names.dat
+     * https://publicsuffix.org/list/public_suffix_list.dat
      */
     private boolean onlineTldListUpdate = false;
+
+    private String publicSuffixSourceUrl = "https://publicsuffix.org/list/public_suffix_list.dat";
+
+    private String publicSuffixLocalFile = null;
 
     /**
      * Should the crawler stop running when the queue is empty?
@@ -196,6 +208,30 @@ public class CrawlConfig {
     private boolean respectNoIndex = true;
 
     /**
+     * The {@link CookieStore} to use to store and retrieve cookies <br />
+     * useful for passing initial cookies to the crawler.
+     */
+    private CookieStore cookieStore;
+
+    /**
+     * DNS resolver to use, #{@link SystemDefaultDnsResolver()} is default.
+     */
+    public void setDnsResolver(final DnsResolver dnsResolver) {
+        this.dnsResolver = dnsResolver;
+    }
+
+    public DnsResolver getDnsResolver() {
+        return dnsResolver;
+    }
+
+    private DnsResolver dnsResolver = new SystemDefaultDnsResolver();
+
+    /*
+     * number of pages to fetch/process from the database in a single read
+     */
+    private int batchReadSize = 50;
+
+    /**
      * Validates the configs specified by this instance.
      *
      * @throws Exception on Validation fail
@@ -243,6 +279,20 @@ public class CrawlConfig {
      */
     public void setResumableCrawling(boolean resumableCrawling) {
         this.resumableCrawling = resumableCrawling;
+    }
+
+    /**
+     * Set the lock timeout for the underlying sleepycat DB, in milliseconds. Default is 500.
+     *
+     * @see com.sleepycat.je.EnvironmentConfig#setLockTimeout(long, java.util.concurrent.TimeUnit)
+     * @param dbLockTimeout
+     */
+    public void setDbLockTimeout(long dbLockTimeout) {
+        this.dbLockTimeout = dbLockTimeout;
+    }
+
+    public long getDbLockTimeout() {
+        return this.dbLockTimeout;
     }
 
     public int getMaxDepthOfCrawling() {
@@ -454,10 +504,37 @@ public class CrawlConfig {
     /**
      * Should the TLD list be updated automatically on each run? Alternatively,
      * it can be loaded from the embedded tld-names.txt resource file that was
-     * obtained from https://publicsuffix.org/list/effective_tld_names.dat
+     * obtained from https://publicsuffix.org/list/public_suffix_list.dat
      */
     public void setOnlineTldListUpdate(boolean online) {
         onlineTldListUpdate = online;
+    }
+
+    public String getPublicSuffixSourceUrl() {
+        return publicSuffixSourceUrl;
+    }
+
+    /**
+     * URL from which the public suffix list is obtained.  By default
+     * this is https://publicsuffix.org/list/public_suffix_list.dat
+     */
+    public void setPublicSuffixSourceUrl(String publicSuffixSourceUrl) {
+        this.publicSuffixSourceUrl = publicSuffixSourceUrl;
+    }
+
+    public String getPublicSuffixLocalFile() {
+        return publicSuffixLocalFile;
+    }
+
+    /**
+     * Only used if {@link #setOnlineTldListUpdate(boolean)} is {@code true}. If
+     * this property is not null then it overrides
+     * {@link #setPublicSuffixSourceUrl(String)}
+     *
+     * @param publicSuffixLocalFile local filename of public suffix list
+     */
+    public void setPublicSuffixLocalFile(String publicSuffixLocalFile) {
+        this.publicSuffixLocalFile = publicSuffixLocalFile;
     }
 
     public String getProxyHost() {
@@ -565,6 +642,27 @@ public class CrawlConfig {
         this.cookiePolicy = cookiePolicy;
     }
 
+    /**
+     * Gets the configured {@link CookieStore} or null if none is set
+     * @return the {@link CookieStore}
+     */
+
+    public CookieStore getCookieStore() {
+        return cookieStore;
+    }
+
+    /**
+     * Sets the {@link CookieStore to be used}
+     * @param cookieStore the {@link CookieStore}
+     */
+    public void setCookieStore(CookieStore cookieStore) {
+        this.cookieStore = cookieStore;
+    }
+
+    /**
+     * Gets the current {@link CookieStore} used
+     * @return the {@link CookieStore}
+     */
     public boolean isRespectNoFollow() {
         return respectNoFollow;
     }
@@ -579,6 +677,19 @@ public class CrawlConfig {
 
     public void setRespectNoIndex(boolean respectNoIndex) {
         this.respectNoIndex = respectNoIndex;
+    }
+
+    /**
+     * Number of pages to fetch/process from the database in a single read transaction.
+     *
+     * @return the batch read size
+     */
+    public int getBatchReadSize() {
+        return batchReadSize;
+    }
+
+    public void setBatchReadSize(int batchReadSize) {
+        this.batchReadSize = batchReadSize;
     }
 
     @Override
@@ -601,13 +712,13 @@ public class CrawlConfig {
         sb.append("Proxy host: " + getProxyHost() + "\n");
         sb.append("Proxy port: " + getProxyPort() + "\n");
         sb.append("Proxy username: " + getProxyUsername() + "\n");
-        sb.append("Proxy password: " + getProxyPassword() + "\n");
         sb.append("Thread monitoring delay: " + getThreadMonitoringDelaySeconds() + "\n");
         sb.append("Thread shutdown delay: " + getThreadShutdownDelaySeconds() + "\n");
         sb.append("Cleanup delay: " + getCleanupDelaySeconds() + "\n");
         sb.append("Cookie policy: " + getCookiePolicy() + "\n");
         sb.append("Respect nofollow: " + isRespectNoFollow() + "\n");
         sb.append("Respect noindex: " + isRespectNoIndex() + "\n");
+        sb.append("Batch read size: " + getBatchReadSize() + "\n");
         return sb.toString();
     }
 }
